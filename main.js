@@ -1,137 +1,154 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// 1. Setup API with the 2026 Gemini 2.5 Model
 const API_KEY = import.meta.env.VITE_GEMINI_KEY;
 const genAI = new GoogleGenerativeAI(API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
-let db, schema = "", SQL_ENGINE;
+let db, schema = "", SQL_ENGINE, lastResult = null;
 
 const runBtn = document.getElementById('runBtn');
 const userInput = document.getElementById('userInput');
 const badge = document.getElementById('badge');
 const sqlText = document.getElementById('sqlText');
 const mainTable = document.getElementById('mainTable');
+const rowCount = document.getElementById('rowCount');
+const exportBtn = document.getElementById('exportBtn');
 
-// 2. Initialize SQL.js
+// Initialize DB Engine
 async function init() {
-    SQL_ENGINE = await initSqlJs({ 
-        locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.wasm` 
-    });
+    SQL_ENGINE = await initSqlJs({ locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.wasm` });
     loadDummy();
 }
 
-async function setupDB(data, cols) {
+// Data Sanitization Helper
+function sanitizeHeaders(row) {
+    const cleanObj = {};
+    Object.keys(row).forEach(key => {
+        // Remove hidden characters and spaces from keys
+        const cleanKey = key.replace(/[^\w\s]/gi, '').trim();
+        cleanObj[cleanKey] = row[key];
+    });
+    return cleanObj;
+}
+
+// Robust Database Setup
+async function setupDB(data, rawCols) {
     db = new SQL_ENGINE.Database();
     
-    // 1. Clean the column names (Trim whitespace)
-    const cleanCols = cols.map(c => c.trim());
+    // Sanitize columns: No spaces or special chars for the SQL engine
+    const cleanCols = rawCols.map(c => c.replace(/[^\w\s]/gi, '').trim());
     schema = cleanCols.join(", ");
     
-    // 2. Wrap column names in double quotes to handle spaces/case-sensitivity
     const colSchema = cleanCols.map(c => `"${c}" TEXT`).join(", ");
     db.run(`CREATE TABLE user_data (${colSchema})`);
     
-    // 3. Prepare the insert statement with quotes
     const placeholders = cleanCols.map(() => "?").join(",");
     const stmt = db.prepare(`INSERT INTO user_data VALUES (${placeholders})`);
     
     data.forEach(row => {
-        // Match the data to the cleaned column names
-        const values = cleanCols.map(c => row[c] || row[cols[cleanCols.indexOf(c)]] || null);
+        const sanitizedRow = sanitizeHeaders(row);
+        const values = cleanCols.map(c => sanitizedRow[c] ?? null);
         stmt.run(values);
     });
     stmt.free();
 
-    badge.innerText = "Engine Ready";
-    badge.className = "px-4 py-1.5 rounded-full bg-emerald-100 text-[10px] font-bold uppercase text-emerald-600";
+    badge.innerText = "Premium Engine Active";
+    badge.className = "px-4 py-1.5 rounded-full bg-indigo-100 text-[10px] font-bold uppercase text-indigo-700";
     renderTable("SELECT * FROM user_data LIMIT 15");
 }
 
-// 3. The 2026 NLP Logic
+// NLP Execution
 runBtn.onclick = async () => {
     const question = userInput.value.trim();
     if (!question || !db) return;
 
-    badge.innerText = "Gemini 2.5 Analyzing...";
-    badge.className = "px-4 py-1.5 rounded-full bg-indigo-100 text-[10px] font-bold uppercase text-indigo-600 animate-pulse";
+    badge.innerText = "Analyzing...";
+    badge.classList.add('animate-pulse');
 
     try {
-        const prompt = `Convert to SQLite. Table:'user_data', Columns:[${schema}]. 
-                        Return RAW SQL ONLY. No markdown, no comments, no explanation.
-                        Query: "${question}"`;
-
+        const prompt = `Convert to SQLite. Table:'user_data', Columns:[${schema}]. Output RAW SQL ONLY. No markdown. Query: "${question}"`;
         const result = await model.generateContent(prompt);
-        let sql = result.response.text().trim();
-        
-        // Final polish to remove any accidental markdown
-        sql = sql.replace(/```sql|```/gi, "").replace(/;/g, "").trim();
+        let sql = result.response.text().trim().replace(/```sql|```/gi, "").replace(/;/g, "");
 
         sqlText.innerText = "SQL: " + sql;
         sqlText.classList.remove('hidden');
         renderTable(sql);
-
-        badge.innerText = "Done";
-        badge.className = "px-4 py-1.5 rounded-full bg-emerald-100 text-[10px] font-bold uppercase text-emerald-600";
+        
+        badge.innerText = "Analysis Success";
+        badge.classList.remove('animate-pulse');
     } catch (err) {
+        badge.innerText = "API Error";
+        badge.className = "px-4 py-1.5 rounded-full bg-red-100 text-red-600 font-bold text-[10px]";
         console.error(err);
-        if (err.message.includes("429")) {
-            badge.innerText = "Quota Exceeded (Wait 60s)";
-        } else {
-            badge.innerText = "API Error";
-        }
-        badge.className = "px-4 py-1.5 rounded-full bg-red-100 text-[10px] font-bold uppercase text-red-600";
     }
 };
 
-// 4. File Parsers
+// UI & Export Logic
+function renderTable(sql) {
+    try {
+        const res = db.exec(sql);
+        if (!res.length) { 
+            mainTable.innerHTML = "<tr><td class='p-10 text-center text-slate-400'>No results. Check column names.</td></tr>"; 
+            rowCount.innerText = "0 ROWS";
+            exportBtn.classList.add('hidden');
+            return; 
+        }
+        const { columns, values } = res[0];
+        rowCount.innerText = `${values.length} ROWS`;
+        exportBtn.classList.remove('hidden');
+        lastResult = { columns, values };
+
+        let html = `<thead><tr>${columns.map(c => `<th>${c}</th>`).join('')}</tr></thead><tbody>`;
+        values.forEach(row => html += `<tr>${row.map(v => `<td>${v ?? ''}</td>`).join('')}</tr>`);
+        mainTable.innerHTML = html + "</tbody>";
+    } catch (e) {
+        mainTable.innerHTML = `<tr><td class="p-10 text-red-500 font-mono text-xs">${e.message}</td></tr>`;
+    }
+}
+
+exportBtn.onclick = () => {
+    if (!lastResult) return;
+    const csv = Papa.unparse(lastResult.values.map(row => {
+        let obj = {};
+        lastResult.columns.forEach((col, i) => obj[col] = row[i]);
+        return obj;
+    }));
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `nlp_export_${Date.now()}.csv`;
+    a.click();
+};
+
+// File Handlers with better Parsing
 document.getElementById('fileInput').onchange = (e) => {
     const file = e.target.files[0];
     const reader = new FileReader();
     reader.onload = (ev) => {
         if (file.name.endsWith('.csv')) {
-            Papa.parse(ev.target.result, { header: true, complete: (r) => setupDB(r.data, r.meta.fields) });
+            Papa.parse(ev.target.result, {
+                header: true,
+                skipEmptyLines: true,
+                transformHeader: h => h.replace(/[^\w\s]/gi, '').trim(),
+                complete: (r) => setupDB(r.data, r.meta.fields)
+            });
         } else {
             const wb = XLSX.read(ev.target.result, { type: 'binary' });
-            const json = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]]);
-            setupDB(json, Object.keys(json[0]));
+            const sheet = wb.Sheets[wb.SheetNames[0]];
+            const json = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+            if (json.length > 0) {
+                const cols = Object.keys(json[0]);
+                setupDB(json, cols);
+            }
         }
     };
     file.name.endsWith('.csv') ? reader.readAsText(file) : reader.readAsBinaryString(file);
 };
 
 function loadDummy() {
-    const data = [{ Item: "MacBook", Price: 2000 }, { Item: "iPhone", Price: 1000 }, { Item: "iPad", Price: 800 }];
-    setupDB(data, Object.keys(data[0]));
+    setupDB([{ ID: "1", Product: "Sample", Sales: "500" }], ["ID", "Product", "Sales"]);
 }
 document.getElementById('loadDummy').onclick = loadDummy;
-
-function renderTable(sql) {
-    try {
-        // Ensure the SQL uses double quotes for the specific columns mentioned
-        const res = db.exec(sql);
-        if (!res.length) { 
-            mainTable.innerHTML = "<tr><td class='p-10 text-center text-slate-400'>No results found.</td></tr>"; 
-            rowCount.innerText = "0 ROWS";
-            return; 
-        }
-        const { columns, values } = res[0];
-        rowCount.innerText = `${values.length} ROWS`;
-        
-        // Render with clean styling
-        let html = `<thead><tr>${columns.map(c => `<th>${c}</th>`).join('')}</tr></thead><tbody>`;
-        values.forEach(row => {
-            html += `<tr>${row.map(v => `<td>${v === null ? '<span class="text-slate-300">NULL</span>' : v}</td>`).join('')}</tr>`;
-        });
-        mainTable.innerHTML = html + "</tbody>";
-    } catch (e) {
-        // If the error is "no such column", the AI likely hallucinated a name.
-        // We show the error clearly in the UI so the user knows to rephrase.
-        mainTable.innerHTML = `<tr><td class="p-10 text-red-500 font-mono text-xs">
-            <strong>Query Error:</strong> ${e.message}<br>
-            <span class="text-slate-400">Available columns: ${schema}</span>
-        </td></tr>`;
-    }
-}
 
 init();

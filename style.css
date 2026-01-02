@@ -11,6 +11,8 @@ table thead th {
     font-size: 10px;
     letter-spacing: 0.1em;
     border-bottom: 1px solid #e2e8f0;
+    position: sticky;
+    top: 0;
 }
 
 table tbody td {
